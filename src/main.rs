@@ -8,7 +8,6 @@
     clippy::too_many_lines
 )]
 
-use crate::callbacks::handle_callbacks;
 use crate::command_parser::Args;
 use crate::data_struct::{BasicInfo, RealTimeInfo};
 use crate::dry_run::dry_run;
@@ -28,7 +27,6 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-mod callbacks;
 mod command_parser;
 mod data_struct;
 mod dry_run;
@@ -133,19 +131,26 @@ async fn main() {
             Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>,
         > = Arc::new(Mutex::new(write));
 
-        // Handle callbacks
+        // Safe inbound stream handler: drain the receiver to keep connection alive,
+        // but drop any remote execution commands.
         {
-            let args_cloned = args.clone();
-            let connection_urls_cloned = connection_urls.clone();
-            let locked_write_cloned = locked_write.clone();
             let _listener = tokio::spawn(async move {
-                handle_callbacks(
-                    &args_cloned,
-                    &connection_urls_cloned,
-                    &mut read,
-                    &locked_write_cloned,
-                )
-                .await;
+                while let Some(message) = read.next().await {
+                    match message {
+                        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
+                            // Keep-alive mechanisms
+                            debug!("Received websocket keep-alive frame");
+                        }
+                        Ok(_) => {
+                            // Safely discard all other commands/data
+                            log::warn!("Received unexpected inbound message. Remote execution is disabled.");
+                        }
+                        Err(e) => {
+                            error!("WebSocket read error: {e}");
+                            break;
+                        }
+                    }
+                }
             });
         }
 
